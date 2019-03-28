@@ -1,80 +1,91 @@
 import json
 import argparse
 from tqdm import tqdm
+import numpy as np
+import pandas as pd
+import os
+
+from PMI import PMI
+from sklearn.metrics import accuracy_score
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--output_dir", default="/IR_output_0", required=False)
-    parser.add_argument("dataset_filename", required=False, default="fiction_reformatted_1/dev_1.json")
+    parser.add_argument("--output_dir", default="fiction_3_28/result_0", required=False)
+    parser.add_argument("--dataset_filename", default="fiction_3_28/data_0/test.json", required=False)
 
     args = parser.parse_args()
 
+    if not os.path.exists(args.output_dir) and os.listdir(args.output_dir):
+        #raise ValueError("Output directory ({})"
+        #                 " already exists and is not empty.".format(
+        #    args.output_dir))
+    #else:
+        os.makedirs(args.output_dir)
+
     with open(args.dataset_filename) as f:
         dataset=json.load(f)
-
-    results = {}
-    for entry in tqdm(dataset['data']):
-        for paragraph in entry["paragraphs"]:
-            paragraph_text = paragraph["context"]
-
-            #make pmi object here
-
-            for qa in paragraph["qas"]:
-                #use pmi object for input and results
-                result = 2
-                results[qa["id"]] = result
-
-    metrics = evaluate_results(results, dataset["data"])
-    with open("output_0.json", "w") as f:
-        json.dump(metrics, f, indent=4)
-
-def evaluate_results(outputs, dataset):
+    total_accuracy = []
     metrics = {}
-    predictions = list()
-    targets = list()
-    for entry in dataset:
-        for paragraph in entry["paragraphs"]:
-            for qa in paragraph["qas"]:
-                if qa["is_impossible"] == True:
-                    targets.append(0)
-                else:
-                    targets.append(1)
-                predictions.append(outputs[qa["id"]]["answer"] + 1)
-                outputs[qa["id"]]["target"] = targets[-1] - 1
+    all_results = {}
+    question_data = []
+    for question_type, data in tqdm(dataset['data'].items()):
+        results = {}
+        for entry in data:
+            for paragraph in entry["paragraphs"]:
+                paragraph_text = paragraph["context"]
 
-    metrics["unaswerable"] = get_metrics_for_label(targets, predictions, 0)
-    metrics["correct_answer"] = get_metrics_for_label(targets, predictions,
-                                                      1)
+                solver = PMI(paragraph_text, 4, 10)
 
-    #metrics["accuracy"] = accuracy_score(targets, predictions)
+                for qa in paragraph["qas"]:
 
-    metrics["outputs"] = outputs
-    return metrics
+                    result = get_highest_scored_answer(qa, solver)
+                    results[qa["id"]] = result
 
-def get_metrics_for_label(targets, predictions, label):
+                    question_data.append((qa["id"], 1 if result["answer"] == result["label"] else 0))
+        all_results[question_type] = results
+        metrics[question_type] = evaluate_results(results)
+        total_accuracy.append(metrics[question_type]["accuracy"])
+        metrics["total_accuracy"] = np.mean(total_accuracy)
+        with open(os.path.join(args.output_dir, "all_results"), "w") as f:
+            json.dump(all_results, f, indent=4)
+        with open(os.path.join(args.output_dir, "output.json"), "w") as f:
+            json.dump(metrics, f, indent=4)
+        df = pd.DataFrame(question_data)
+        df.to_csv(os.path.join(args.output_dir,"heatmap_data.csv"), index=False)
+
+def get_highest_scored_answer(qa, search):
+
+    question_text = qa["question"]
+
+    is_impossible = qa["type"] == "Unanswerable"
+
+    answer_texts = []
+    for i in range(0, 4):
+        answer_text = qa["answer_{}".format(i)]
+        if answer_text["text"] != "not enough information":
+            answer_texts.append(answer_text)
+        elif answer_text["correct"] is True:
+            label = -1
+
+    for i, j in enumerate(answer_texts):
+        if j["correct"] is True:
+            label = i
+
+    result = search.get_result(qa, answer_texts)
+    result["label"] = label
+    return result
+
+
+def evaluate_results(outputs):
     metrics = {}
-    true_positives = [1 for target, prediction in zip(targets, predictions)
-                      if
-                      (target == label and prediction == label)]
-    false_positives = [1 for target, prediction in zip(targets, predictions)
-                       if
-                       (target != label and prediction == label)]
-    false_negatives = [1 for target, prediction in zip(targets, predictions)
-                       if
-                       (target == label and prediction != label)]
 
-    true_positives = sum(true_positives)
-    false_positives = sum(false_positives)
-    false_negatives = sum(false_negatives)
+    targets = [output["label"] for output in outputs.values()]
+    predictions = [output["answer"] for output in outputs.values()]
 
-    metrics["precision"] = true_positives / (
-                true_positives + false_positives)
-    metrics["recall"] = true_positives / (true_positives + false_negatives)
-    metrics["F1"] = 2 * metrics["precision"] * metrics["recall"] / (
-                metrics["precision"] + metrics["recall"])
-
+    metrics["accuracy"] = accuracy_score(targets, predictions)
+    num_neg_predictions = len([1 for prediction in predictions if (prediction == -1)])
+    metrics["unanswerable_predictions_ratio"] =  num_neg_predictions/len(predictions)
     return metrics
-
 
 if __name__ == "__main__":
     main()
